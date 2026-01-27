@@ -6,9 +6,21 @@ on:
 
 jobs:
   deploy:
-    uses: vhvplatform/vsystem-saas-cicd/.github/workflows/master-pipeline-staging.yml@main
-    secrets: inherit
+    #uses: vhvplatform/vsystem-saas-cicd/.github/workflows/master-pipeline-staging.yml@main
+    #secrets: inherit
 
-    with:
-      service_name: auth-service
-      deployment_file_name: auth-ser-deployment
+    #with:
+    #  service_name: auth-service
+    #  deployment_file_name: auth-ser-deployment
+    runs-on: [self-hosted, Linux, X64, build-image-staging-runner]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Say hello
+        run: |
+          echo "Hello GitHub Actions 🚀"
+          echo "Repo: $GITHUB_REPOSITORY"
+          echo "Branch: $GITHUB_REF"
+          ls -lta
