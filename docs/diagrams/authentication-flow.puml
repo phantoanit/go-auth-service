@@ -1,0 +1,121 @@
+@startuml Authentication Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+
+title Authentication Flow - Login, Registration, and Logout
+
+actor User
+participant "Web App" as Web
+participant "API Gateway" as Gateway
+participant "Auth Service" as Auth
+database MongoDB
+database Redis
+
+== User Registration ==
+User -> Web: Click "Sign Up"
+Web -> Gateway: POST /api/v1/auth/register\n{email, password, name}
+Gateway -> Auth: Forward request
+Auth -> Auth: Validate input\n(email format, password strength)
+Auth -> Auth: Hash password with bcrypt\n(cost factor 12)
+Auth -> MongoDB: Create user record\n{email, password_hash, is_verified: false}
+MongoDB --> Auth: User created
+Auth -> Auth: Generate verification token
+Auth -> Auth: Send verification email
+Auth --> Gateway: 201 Created\n{message: "Verification email sent"}
+Gateway --> Web: Success response
+Web --> User: "Check your email to verify account"
+
+== Email Verification ==
+User -> User: Check email
+User -> Web: Click verification link
+Web -> Gateway: GET /api/v1/auth/verify?token=xxx
+Gateway -> Auth: Verify token
+Auth -> Auth: Validate token\n(expiration, signature)
+Auth -> MongoDB: Update user\n{is_verified: true, email_verified_at}
+MongoDB --> Auth: User verified
+Auth --> Gateway: 200 OK\n{message: "Email verified"}
+Gateway --> Web: Success response
+Web --> User: "Account verified! Please login"
+
+== User Login ==
+User -> Web: Enter credentials\n(email, password)
+Web -> Gateway: POST /api/v1/auth/login\n{email, password}
+Gateway -> Auth: Forward request
+
+Auth -> Auth: Validate input
+Auth -> MongoDB: Find user by email
+MongoDB --> Auth: User data
+
+alt User not found or not verified
+    Auth --> Gateway: 401 Unauthorized\n{error: "Invalid credentials"}
+    Gateway --> Web: Error response
+    Web --> User: Show error message
+else User found and verified
+    Auth -> Auth: Compare password with bcrypt
+    
+    alt Password incorrect
+        Auth -> Redis: Increment failed attempts\nKey: "failed_login:{email}"
+        Redis --> Auth: Attempt count
+        
+        alt Failed attempts >= 5
+            Auth -> Redis: Set lockout\nKey: "lockout:{email}"\nTTL: 15 minutes
+            Auth --> Gateway: 429 Too Many Requests\n{error: "Account locked"}
+            Gateway --> Web: Error response
+            Web --> User: "Too many failed attempts.\nTry again in 15 minutes"
+        else
+            Auth --> Gateway: 401 Unauthorized\n{error: "Invalid credentials"}
+            Gateway --> Web: Error response
+            Web --> User: Show error message
+        end
+    else Password correct
+        Auth -> Redis: Clear failed attempts
+        Auth -> Auth: Generate JWT access token\n(expiry: 15 min)
+        Auth -> Auth: Generate refresh token\n(expiry: 7 days)
+        Auth -> Auth: Hash refresh token
+        Auth -> MongoDB: Store refresh token\n{user_id, token_hash, expires_at, ip, user_agent}
+        Auth -> MongoDB: Update last_login_at
+        Auth -> Redis: Cache user session\nKey: "session:{user_id}"\nTTL: 15 minutes
+        Auth --> Gateway: 200 OK\n{access_token, refresh_token, expires_in}
+        Gateway --> Web: Success with tokens
+        Web -> Web: Store access_token in memory\nStore refresh_token in httpOnly cookie
+        Web --> User: Redirect to dashboard
+    end
+end
+
+== Access Protected Resource ==
+User -> Web: Navigate to protected page
+Web -> Gateway: GET /api/v1/users/profile\nAuthorization: Bearer {access_token}
+Gateway -> Auth: Validate token
+Auth -> Auth: Verify JWT signature\nCheck expiration
+Auth -> Redis: Check token blacklist\nKey: "blacklist:{token_id}"
+Redis --> Auth: Not blacklisted
+
+alt Token valid
+    Auth -> Redis: Get cached user data\nKey: "session:{user_id}"
+    Redis --> Auth: User data
+    Auth --> Gateway: 200 OK\n{user_id, roles, permissions}
+    Gateway -> Gateway: Add user context to request
+    Gateway -> Web: Forward to protected resource
+    Web --> User: Show protected content
+else Token invalid or expired
+    Auth --> Gateway: 401 Unauthorized
+    Gateway --> Web: Token invalid
+    Web -> Web: Use refresh_token to get new access_token
+end
+
+== User Logout ==
+User -> Web: Click "Logout"
+Web -> Gateway: POST /api/v1/auth/logout\nAuthorization: Bearer {access_token}
+Gateway -> Auth: Logout request
+Auth -> Auth: Extract token_id from JWT
+Auth -> Redis: Add token to blacklist\nKey: "blacklist:{token_id}"\nTTL: remaining token lifetime
+Auth -> MongoDB: Revoke refresh tokens\n{user_id, revoked_at}
+Auth -> Redis: Delete user session\nKey: "session:{user_id}"
+Auth --> Gateway: 200 OK\n{message: "Logged out successfully"}
+Gateway --> Web: Success response
+Web -> Web: Clear tokens from memory and cookies
+Web --> User: Redirect to login page
+
+@enduml

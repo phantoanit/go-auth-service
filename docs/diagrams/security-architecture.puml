@@ -1,0 +1,261 @@
+@startuml Security Architecture
+
+title Security Architecture - Go Auth Service
+
+!define RECTANGLE_BOUNDARY_COLOR #0066CC
+!define DATABASE_COLOR #006633
+!define SECURITY_COLOR #CC0000
+
+package "Client Layer" {
+    [Web Application] as WebApp
+    [Mobile App] as MobileApp
+    [Third-party Service] as ThirdParty
+}
+
+package "API Gateway Layer" {
+    component "API Gateway" as Gateway {
+        [Rate Limiter] as RateLimiter
+        [CORS Handler] as CORS
+        [Request Logger] as ReqLogger
+        [TLS Termination] as TLS
+    }
+}
+
+package "Authentication Service" <<RECTANGLE_BOUNDARY_COLOR>> {
+    
+    package "HTTP/gRPC Servers" {
+        [HTTP Server\n:8081] as HTTP
+        [gRPC Server\n:50051] as GRPC
+    }
+    
+    package "Middleware Layer" <<SECURITY_COLOR>> {
+        [JWT Validator] as JWTValid
+        [Auth Middleware] as AuthMW
+        [Rate Limiting] as RateLimit
+        [Request Validation] as ReqValid
+        [CSRF Protection] as CSRF
+        [Security Headers] as SecHeaders
+    }
+    
+    package "Handler Layer" {
+        [Auth Handler] as AuthHandler
+        [User Handler] as UserHandler
+        [OAuth Handler] as OAuthHandler
+    }
+    
+    package "Service Layer" {
+        [Auth Service] as AuthService
+        [User Service] as UserService
+        [Token Service] as TokenService
+        [OAuth Service] as OAuthService
+        [2FA Service] as TwoFAService
+        [Session Service] as SessionService
+    }
+    
+    package "Security Components" <<SECURITY_COLOR>> {
+        [JWT Manager] as JWTMgr
+        [Password Hasher\n(bcrypt)] as PwdHasher
+        [TOTP Generator] as TOTP
+        [Encryption Service\n(AES-256)] as Encryption
+        [Audit Logger] as AuditLog
+        [Rate Limiter] as ServiceRateLimit
+    }
+    
+    package "Repository Layer" {
+        [User Repository] as UserRepo
+        [Token Repository] as TokenRepo
+        [Role Repository] as RoleRepo
+        [OAuth Repository] as OAuthRepo
+        [Audit Repository] as AuditRepo
+    }
+}
+
+package "Data Layer" <<DATABASE_COLOR>> {
+    database "MongoDB" as MongoDB {
+        [users] as UsersCol
+        [refresh_tokens] as TokensCol
+        [roles] as RolesCol
+        [permissions] as PermsCol
+        [oauth_accounts] as OAuthCol
+        [audit_logs] as AuditCol
+    }
+    
+    database "Redis Cache" as Redis {
+        [sessions] as Sessions
+        [rate_limits] as RateLimits
+        [blacklist] as Blacklist
+        [2fa_pending] as TwoFAPending
+    }
+}
+
+package "External Services" {
+    [OAuth Providers\n(Google, GitHub)] as OAuthProviders
+    [Email Service\n(SMTP)] as EmailService
+    [Monitoring\n(Prometheus)] as Monitoring
+    [Log Aggregation\n(ELK)] as LogAggregation
+}
+
+' Client to Gateway connections
+WebApp --> Gateway : HTTPS
+MobileApp --> Gateway : HTTPS
+ThirdParty --> Gateway : HTTPS/API Key
+
+' Gateway to Auth Service
+Gateway --> HTTP : Forward HTTP
+Gateway --> GRPC : Forward gRPC
+
+' HTTP/gRPC to Middleware
+HTTP --> AuthMW
+GRPC --> AuthMW
+
+' Middleware flow
+AuthMW --> JWTValid : Validate Token
+JWTValid --> ReqValid : Valid Token
+ReqValid --> RateLimit : Valid Request
+RateLimit --> CSRF : Check Rate
+CSRF --> SecHeaders : Add Headers
+SecHeaders --> AuthHandler : Authorized Request
+
+' Handler to Service
+AuthHandler --> AuthService
+AuthHandler --> UserService
+OAuthHandler --> OAuthService
+
+' Service to Security Components
+AuthService --> JWTMgr : Generate/Validate Tokens
+AuthService --> PwdHasher : Hash/Verify Passwords
+AuthService --> SessionService : Manage Sessions
+AuthService --> AuditLog : Log Events
+TwoFAService --> TOTP : Generate/Verify Codes
+OAuthService --> Encryption : Encrypt OAuth Tokens
+AuthService --> ServiceRateLimit : Check Limits
+
+' Service to Repository
+AuthService --> UserRepo
+AuthService --> TokenRepo
+UserService --> RoleRepo
+OAuthService --> OAuthRepo
+AuditLog --> AuditRepo
+
+' Repository to Databases
+UserRepo --> MongoDB
+TokenRepo --> MongoDB
+RoleRepo --> MongoDB
+OAuthRepo --> MongoDB
+AuditRepo --> MongoDB
+
+SessionService --> Redis
+ServiceRateLimit --> Redis
+AuthService --> Redis
+
+' External service connections
+OAuthService --> OAuthProviders : OAuth Flow
+AuthService --> EmailService : Password Reset, 2FA
+AuthService --> Monitoring : Metrics
+AuditLog --> LogAggregation : Security Events
+
+' Security Notes
+note right of JWTMgr
+  **JWT Security**
+  - HS256 algorithm
+  - Secret key from env
+  - Short-lived tokens (1h)
+  - Token rotation
+end note
+
+note right of PwdHasher
+  **Password Security**
+  - bcrypt algorithm
+  - Cost factor: 12
+  - Salted automatically
+  - Timing-safe comparison
+end note
+
+note bottom of Redis
+  **Cache Security**
+  - Password protected
+  - TLS connection
+  - TTL for all keys
+  - Encrypted sensitive data
+end note
+
+note bottom of MongoDB
+  **Database Security**
+  - Authentication enabled
+  - TLS connection
+  - Role-based access
+  - Encrypted at rest
+  - Field-level encryption
+  - Audit logging
+end note
+
+note left of AuthMW
+  **Defense Layers**
+  1. TLS/HTTPS only
+  2. Rate limiting
+  3. CSRF protection
+  4. XSS prevention
+  5. SQL injection protection
+  6. Input validation
+  7. Output encoding
+  8. Security headers
+  9. CORS policy
+  10. Request signing
+end note
+
+note right of AuditLog
+  **Audit Events**
+  - Login attempts (success/fail)
+  - Password changes
+  - Token generation
+  - Session creation
+  - Permission checks
+  - Failed validations
+  - Account lockouts
+  - 2FA events
+  - OAuth connections
+end note
+
+' Security Boundaries
+rectangle "Security Perimeter" <<SECURITY_COLOR>> {
+    note as SecurityNote
+        **Security Controls**
+        
+        **Network Security:**
+        - TLS 1.3 for all connections
+        - Certificate pinning
+        - Mutual TLS (mTLS) for services
+        
+        **Authentication:**
+        - Multi-factor authentication (2FA)
+        - OAuth2 integration
+        - Password policies
+        - Account lockout
+        
+        **Authorization:**
+        - RBAC (Role-Based Access Control)
+        - Permission-based access
+        - Tenant isolation
+        - Resource-level permissions
+        
+        **Data Protection:**
+        - Encryption at rest (AES-256)
+        - Encryption in transit (TLS)
+        - Token encryption
+        - PII data masking
+        
+        **Monitoring:**
+        - Real-time alerts
+        - Anomaly detection
+        - Failed login tracking
+        - Session monitoring
+        
+        **Compliance:**
+        - GDPR compliant
+        - OWASP Top 10 coverage
+        - SOC 2 controls
+        - Regular security audits
+    end note
+}
+
+@enduml

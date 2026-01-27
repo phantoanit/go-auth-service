@@ -1,0 +1,106 @@
+@startuml JWT Token Lifecycle
+
+title JWT Token Lifecycle - Generation, Validation, Refresh, Revocation
+
+participant "Auth Service" as Auth
+participant "JWT Manager" as JWT
+database "MongoDB" as DB
+database "Redis Cache" as Redis
+participant "Client" as Client
+
+== Token Generation ==
+Auth -> JWT: GenerateToken(user_id, tenant_id, email, roles)
+JWT -> JWT: Create claims:\n- sub: user_id\n- tenant_id\n- email\n- roles\n- iat: issued_at\n- exp: expires_at (now + 1 hour)
+JWT -> JWT: Sign with secret key (HS256)
+JWT --> Auth: Access Token (JWT string)
+
+Auth -> JWT: GenerateRefreshToken(user_id, tenant_id)
+JWT -> JWT: Create claims:\n- sub: user_id\n- tenant_id\n- type: "refresh"\n- iat: issued_at\n- exp: expires_at (now + 7 days)
+JWT -> JWT: Sign with secret key
+JWT --> Auth: Refresh Token (JWT string)
+
+Auth -> DB: Store refresh token\n{user_id, token, expires_at, created_at}
+Auth -> Redis: Store session\nKey: session:{user_id}\nTTL: 1 hour\nValue: {user_id, tenant_id, email, roles}
+Auth --> Client: {access_token, refresh_token}
+
+== Token Validation ==
+Client -> Auth: Request with Authorization header\nBearer {access_token}
+Auth -> JWT: ValidateToken(token_string)
+JWT -> JWT: Parse token
+JWT -> JWT: Verify signature with secret
+alt Token is valid
+    JWT -> JWT: Check expiration time
+    alt Not expired
+        JWT --> Auth: Claims {user_id, tenant_id, email, roles}
+        Auth -> Redis: Check session exists\nKey: session:{user_id}
+        alt Session exists
+            Redis --> Auth: Session data
+            Auth --> Client: Request authorized with user context
+        else Session not found
+            Auth --> Client: 401 Unauthorized - Session expired
+        end
+    else Token expired
+        JWT --> Auth: Error: Token expired
+        Auth --> Client: 401 Unauthorized - Token expired
+    end
+else Invalid token
+    JWT --> Auth: Error: Invalid signature
+    Auth --> Client: 401 Unauthorized - Invalid token
+end
+
+== Token Refresh ==
+Client -> Auth: POST /auth/refresh\n{refresh_token}
+Auth -> DB: Find refresh token
+DB --> Auth: Token record
+Auth -> Auth: Check if revoked\n(revoked_at != null)
+alt Token not revoked
+    Auth -> JWT: ValidateToken(refresh_token)
+    JWT -> JWT: Verify and parse token
+    alt Valid and not expired
+        JWT --> Auth: Claims {user_id, tenant_id}
+        Auth -> DB: Find user by ID
+        DB --> Auth: User data
+        Auth -> JWT: Generate new access token
+        Auth -> JWT: Generate new refresh token
+        Auth -> DB: Revoke old refresh token\nSET revoked_at = now()
+        Auth -> DB: Store new refresh token
+        Auth -> Redis: Update session
+        Auth --> Client: {new_access_token, new_refresh_token}
+    else Expired or invalid
+        JWT --> Auth: Error: Invalid refresh token
+        Auth --> Client: 401 Unauthorized - Invalid refresh token
+    end
+else Token revoked
+    Auth --> Client: 401 Unauthorized - Token revoked
+end
+
+== Token Revocation (Logout) ==
+Client -> Auth: POST /auth/logout\n{refresh_token}
+Auth -> DB: Find refresh token by value
+DB --> Auth: Token record
+Auth -> DB: Update token\nSET revoked_at = now()\nSET revoked_by = user_id
+DB --> Auth: Token revoked
+Auth -> Redis: Delete session\nKey: session:{user_id}
+Auth --> Client: 200 OK - Logged out
+
+== Automatic Token Cleanup ==
+note over DB
+  Background job runs periodically
+  to clean up expired tokens
+end note
+
+DB -> DB: DELETE FROM refresh_tokens\nWHERE expires_at < now()\nOR (revoked_at IS NOT NULL\nAND revoked_at < now() - 30 days)
+
+== Security Features ==
+note over JWT, Redis
+  1. Short-lived access tokens (1 hour)
+  2. Long-lived refresh tokens (7 days)
+  3. Token rotation on refresh
+  4. Session validation in Redis
+  5. Refresh token stored in DB
+  6. Revocation tracking
+  7. Automatic cleanup
+  8. Signature verification
+end note
+
+@enduml

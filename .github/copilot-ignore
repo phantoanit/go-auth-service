@@ -1,0 +1,57 @@
+# ========================
+# Dependencies
+# ========================
+node_modules/
+vendor/
+.go/pkg/mod/
+
+# ========================
+# Build outputs
+# ========================
+dist/
+build/
+out/
+bin/
+coverage/
+.next/
+.nuxt/
+
+# ========================
+# Logs & runtime
+# ========================
+*.log
+logs/
+tmp/
+temp/
+
+# ========================
+# Environment & secrets
+# ========================
+*.pem
+*.key
+*.crt
+*.p12
+
+# ========================
+# Databases & dumps
+# ========================
+*.sql
+*.dump
+*.bak
+*.backup
+*.sqlite
+*.db
+
+# ========================
+# Large generated assets
+# ========================
+public/uploads/
+storage/uploads/
+media/
+uploads/
+
+# ========================
+# IDE
+# ========================
+.vscode/
+.idea/

@@ -1,0 +1,163 @@
+@startuml JWT Token Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+
+title JWT Token Flow - Generation, Validation, and Refresh
+
+actor User
+participant "Client App" as Client
+participant "Auth Service" as Auth
+participant "Resource Service" as Resource
+database MongoDB
+database Redis
+
+== Token Generation (Login) ==
+User -> Client: Login with credentials
+Client -> Auth: POST /api/v1/auth/login\n{email, password}
+Auth -> Auth: Authenticate user
+Auth -> Auth: Create JWT payload\n{\n  user_id,\n  email,\n  roles,\n  tenant_id,\n  iat, exp, jti\n}
+
+Auth -> Auth: Sign JWT with secret\nAlgorithm: HS256 or RS256
+note right
+  Access Token Structure:
+  Header: {alg: "HS256", typ: "JWT"}
+  Payload: {
+    user_id: "123",
+    email: "user@example.com",
+    roles: ["user"],
+    tenant_id: "tenant-1",
+    iat: 1234567890,
+    exp: 1234568790,
+    jti: "unique-token-id"
+  }
+  Signature: HMACSHA256(
+    base64UrlEncode(header) + "." +
+    base64UrlEncode(payload),
+    secret
+  )
+end note
+
+Auth -> Auth: Generate refresh token\n(secure random 32 bytes)
+Auth -> Auth: Hash refresh token\n(SHA256)
+Auth -> MongoDB: Store refresh token\n{\n  token_hash,\n  user_id,\n  expires_at: now() + 7 days,\n  ip_address,\n  user_agent\n}
+MongoDB --> Auth: Stored
+
+Auth -> Redis: Cache user session\nKey: "session:{user_id}"\nValue: {roles, permissions}\nTTL: 15 minutes
+Redis --> Auth: Cached
+
+Auth --> Client: 200 OK\n{\n  access_token: "eyJ...",\n  refresh_token: "xxx",\n  token_type: "Bearer",\n  expires_in: 900\n}
+Client -> Client: Store access_token in memory
+Client -> Client: Store refresh_token in httpOnly cookie
+Client --> User: Login successful
+
+== Token Validation ==
+User -> Client: Access protected resource
+Client -> Resource: GET /api/v1/data\nAuthorization: Bearer eyJ...
+Resource -> Auth: Validate token (gRPC call)
+
+Auth -> Auth: Parse JWT token
+Auth -> Auth: Verify signature\nusing secret key
+
+alt Invalid signature
+    Auth --> Resource: Invalid token
+    Resource --> Client: 401 Unauthorized
+    Client --> User: Please login again
+else Valid signature
+    Auth -> Auth: Check expiration\n(exp claim)
+    
+    alt Token expired
+        Auth --> Resource: Token expired
+        Resource --> Client: 401 Unauthorized\n{error: "token_expired"}
+        Client -> Client: Attempt token refresh
+    else Token valid
+        Auth -> Redis: Check token blacklist\nKey: "blacklist:{jti}"
+        Redis --> Auth: Not in blacklist
+        
+        alt Token blacklisted
+            Auth --> Resource: Token revoked
+            Resource --> Client: 401 Unauthorized
+            Client --> User: Session terminated
+        else Token active
+            Auth -> Redis: Get cached session\nKey: "session:{user_id}"
+            Redis --> Auth: User data (roles, permissions)
+            
+            Auth --> Resource: Valid token\n{\n  user_id,\n  email,\n  roles,\n  permissions\n}
+            Resource -> Resource: Check permissions\nfor requested resource
+            
+            alt Has permission
+                Resource --> Client: 200 OK\n{data}
+                Client --> User: Show data
+            else No permission
+                Resource --> Client: 403 Forbidden
+                Client --> User: Access denied
+            end
+        end
+    end
+end
+
+== Token Refresh ==
+Client -> Client: Access token expired
+Client -> Auth: POST /api/v1/auth/refresh\n{refresh_token: "xxx"}
+
+Auth -> Auth: Hash provided refresh token
+Auth -> MongoDB: Find refresh token\n{\n  token_hash,\n  user_id,\n  revoked_at: null,\n  expires_at > now()\n}
+MongoDB --> Auth: Token record
+
+alt Token not found or revoked
+    Auth --> Client: 401 Unauthorized\n{error: "invalid_refresh_token"}
+    Client -> Client: Clear all tokens
+    Client --> User: Please login again
+else Token valid
+    Auth -> Auth: Check expiration
+    
+    alt Token expired
+        Auth -> MongoDB: Delete expired token
+        Auth --> Client: 401 Unauthorized\n{error: "refresh_token_expired"}
+        Client --> User: Please login again
+    else Token valid
+        Auth -> MongoDB: Revoke old refresh token\n{revoked_at: now()}
+        
+        Auth -> Auth: Generate new access token\n(same process as login)
+        Auth -> Auth: Generate new refresh token
+        Auth -> Auth: Hash new refresh token
+        Auth -> MongoDB: Store new refresh token
+        
+        Auth -> Redis: Update cached session\nKey: "session:{user_id}"\nTTL: 15 minutes
+        
+        Auth --> Client: 200 OK\n{\n  access_token: "eyJ...",\n  refresh_token: "yyy",\n  expires_in: 900\n}
+        Client -> Client: Update stored tokens
+        Client -> Resource: Retry original request\nwith new access_token
+        Resource --> Client: 200 OK {data}
+        Client --> User: Show data
+    end
+end
+
+== Token Revocation (Logout) ==
+User -> Client: Logout
+Client -> Auth: POST /api/v1/auth/logout\nAuthorization: Bearer eyJ...
+
+Auth -> Auth: Extract jti from token
+Auth -> Auth: Calculate remaining TTL\nTTL = exp - now()
+Auth -> Redis: Add to blacklist\nKey: "blacklist:{jti}"\nValue: 1\nTTL: remaining token lifetime
+Redis --> Auth: Blacklisted
+
+Auth -> MongoDB: Revoke all refresh tokens\nfor user_id\n{revoked_at: now()}
+MongoDB --> Auth: Tokens revoked
+
+Auth -> Redis: Delete user session\nKey: "session:{user_id}"
+Redis --> Auth: Session deleted
+
+Auth --> Client: 200 OK\n{message: "Logged out"}
+Client -> Client: Clear all tokens
+Client --> User: Redirect to login
+
+note over Auth, Redis
+  Token Blacklist Cleanup:
+  - Expired entries are automatically removed by Redis TTL
+  - No manual cleanup needed
+  - Memory efficient
+end note
+
+@enduml

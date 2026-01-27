@@ -1,0 +1,314 @@
+@startuml Database ER Diagram
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+skinparam linetype ortho
+
+title Authentication Service - Entity Relationship Diagram
+
+' Define entities
+entity "users_auth" as user {
+  * **id** : ObjectId <<PK>>
+  --
+  * email : String <<UK>>
+  * password_hash : String
+  * tenant_id : String <<FK>>
+  * roles : [String]
+  * is_active : Boolean
+  * is_verified : Boolean
+  last_login_at : Date
+  * created_at : Date
+  * updated_at : Date
+}
+
+entity "refresh_tokens" as token {
+  * **id** : ObjectId <<PK>>
+  --
+  * user_id : String <<FK>>
+  * token : String <<UK>>
+  * expires_at : Date
+  * created_at : Date
+  revoked_at : Date
+}
+
+entity "roles" as role {
+  * **id** : ObjectId <<PK>>
+  --
+  * name : String <<UK>>
+  * description : String
+  * permissions : [String]
+  tenant_id : String <<FK>>
+  * created_at : Date
+  * updated_at : Date
+}
+
+entity "permissions" as permission {
+  * **id** : ObjectId <<PK>>
+  --
+  * name : String
+  * description : String
+  * resource : String
+  * action : String
+  * created_at : Date
+  * updated_at : Date
+}
+
+entity "oauth_accounts" as oauth {
+  * **id** : ObjectId <<PK>>
+  --
+  * user_id : String <<FK>>
+  * provider : String
+  * provider_id : String <<UK>>
+  * email : String
+  * created_at : Date
+  * updated_at : Date
+}
+
+' Virtual entity for clarity
+entity "tenant" as tenant {
+  * **tenant_id** : String <<PK>>
+  --
+  name : String
+  ..
+  (Logical Entity)
+  (Not stored in DB)
+}
+
+' Define relationships
+user ||--o{ token : "has many"
+user ||--o{ oauth : "linked to"
+user }o--|| tenant : "belongs to"
+role }o--o| tenant : "belongs to (optional)"
+user }o--o{ role : "assigned"
+
+' Relationship labels with cardinality
+note right of user
+  **users_auth Collection**
+  
+  Primary authentication entity
+  
+  **Indexes:**
+  1. {email: 1} UNIQUE
+  2. {tenant_id: 1}
+  3. {email: 1, tenant_id: 1} UNIQUE
+  
+  **Constraints:**
+  - Email unique per tenant
+  - Password never exposed (JSON: "-")
+  - Roles denormalized for performance
+  
+  **Security:**
+  - Bcrypt password hash (cost: 12)
+  - Active/Verified flags
+  - Last login tracking
+end note
+
+note right of token
+  **refresh_tokens Collection**
+  
+  JWT refresh token management
+  
+  **Indexes:**
+  1. {user_id: 1}
+  2. {token: 1} UNIQUE
+  3. {expires_at: 1} TTL=0
+  
+  **Token Lifecycle:**
+  - Created on login/refresh
+  - Validated with expiry check
+  - Revoked on logout
+  - Auto-deleted by TTL index
+  
+  **Security:**
+  - One-time use on refresh
+  - Revocation tracking
+  - 7-day expiration (default)
+end note
+
+note left of role
+  **roles Collection**
+  
+  RBAC role definitions
+  
+  **Indexes:**
+  1. {name: 1, tenant_id: 1} UNIQUE
+  
+  **Multi-Tenancy:**
+  - System roles: tenant_id = null
+  - Tenant roles: tenant_id set
+  
+  **Permissions:**
+  - Stored as string array
+  - Format: "action:resource"
+  - Embedded for performance
+  
+  **Examples:**
+  - admin, user, moderator
+  - read:users, write:posts
+end note
+
+note left of permission
+  **permissions Collection**
+  
+  Permission catalog (optional)
+  
+  Used for:
+  - Permission discovery
+  - Management UI
+  - Documentation
+  
+  **Structure:**
+  - resource: Entity type
+  - action: Operation type
+  - name: Combined identifier
+  
+  **Note:**
+  Enforcement via roles.permissions
+end note
+
+note bottom of oauth
+  **oauth_accounts Collection**
+  
+  OAuth provider linking
+  
+  **Supported Providers:**
+  - google
+  - github
+  - (extensible)
+  
+  **Features:**
+  - Multiple providers per user
+  - Account linking support
+  - Email from provider
+  
+  **Recommended Indexes:**
+  1. {user_id: 1}
+  2. {provider: 1, provider_id: 1} UNIQUE
+end note
+
+' Cardinality and relationship descriptions
+note on link #1
+  1:N relationship
+  
+  One user can have multiple
+  active refresh tokens
+  (multiple devices/sessions)
+end note
+
+note on link #2
+  1:N relationship
+  
+  One user can link multiple
+  OAuth provider accounts
+  (Google, GitHub, etc.)
+end note
+
+note on link #3
+  N:1 relationship
+  
+  Every user belongs to
+  exactly one tenant
+  (tenant isolation)
+end note
+
+note on link #4
+  N:1 optional
+  
+  Roles can be:
+  - System-wide (no tenant)
+  - Tenant-specific
+end note
+
+note on link #5
+  N:N relationship (embedded)
+  
+  User.roles contains role names
+  Roles looked up from roles collection
+  
+  Denormalized for authorization
+  performance
+end note
+
+' Additional architecture notes
+note top of user
+  **Multi-Tenancy Design**
+  
+  All queries filtered by tenant_id
+  
+  Ensures data isolation at
+  application layer
+  
+  Composite unique indexes
+  allow same email across tenants
+end note
+
+legend bottom left
+  **Legend**
+  
+  **PK** = Primary Key
+  **FK** = Foreign Key
+  **UK** = Unique Key
+  
+  **Cardinality:**
+  ||--|| = One to One
+  ||--o{ = One to Many
+  }o--o{ = Many to Many
+  }o--|| = Many to One
+  }o--o| = Many to Zero or One
+  
+  **Field Notation:**
+  * = Required field
+  (no marker) = Optional field
+  
+  **Relationships:**
+  Solid lines = Direct relationships
+  Dotted lines = Logical relationships
+  
+  **Index Types:**
+  TTL = Time To Live (auto-delete)
+  UNIQUE = Unique constraint
+  
+  **Database:** MongoDB 4.4+
+  **Design Pattern:** Multi-tenant SaaS
+end legend
+
+' Visual grouping
+package "Core Authentication" {
+  user
+  token
+}
+
+package "Authorization (RBAC)" {
+  role
+  permission
+}
+
+package "OAuth Integration" {
+  oauth
+}
+
+package "Logical Entities" {
+  tenant
+}
+
+' Data flow annotations
+note as DataFlow
+  **Common Data Flows:**
+  
+  1. **Login Flow:**
+     users_auth (validate) → refresh_tokens (create)
+  
+  2. **Authorization Flow:**
+     users_auth.roles → roles (lookup) → roles.permissions
+  
+  3. **OAuth Flow:**
+     oauth_accounts (find/create) → users_auth (link/create)
+  
+  4. **Token Refresh:**
+     refresh_tokens (validate) → refresh_tokens (revoke + create new)
+  
+  5. **Multi-tenant Query:**
+     tenant_id filter → users_auth, roles (filtered results)
+end note
+
+@enduml

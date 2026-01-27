@@ -1,0 +1,146 @@
+@startuml OAuth2 Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+
+title OAuth2 Authentication Flow
+
+actor User
+participant "Client App" as Client
+participant "Auth Service" as Auth
+participant "OAuth Provider\n(Google/GitHub)" as OAuth
+database MongoDB
+database Redis
+
+== OAuth2 Authorization Code Flow ==
+
+User -> Client: Click "Login with Google"
+Client -> Auth: GET /api/v1/auth/oauth/google
+
+Auth -> Auth: Generate state token\n(CSRF protection)
+Auth -> Redis: Store state token\nKey: "oauth_state:{state}"\nValue: {redirect_url, ...}\nTTL: 10 minutes
+Redis --> Auth: Stored
+
+Auth -> Auth: Build authorization URL\n{\n  client_id,\n  redirect_uri,\n  scope: "email profile",\n  state,\n  response_type: "code"\n}
+
+Auth --> Client: 302 Redirect\nhttps://accounts.google.com/o/oauth2/v2/auth?\n  client_id=xxx&\n  redirect_uri=callback&\n  scope=email+profile&\n  state=random_token&\n  response_type=code
+
+Client --> User: Redirect to Google
+
+User -> OAuth: View consent screen
+User -> OAuth: Grant permissions
+OAuth -> OAuth: Generate authorization code
+
+OAuth --> Client: 302 Redirect\nhttp://app.example.com/auth/google/callback?\n  code=auth_code_123&\n  state=random_token
+
+Client -> Auth: GET /api/v1/auth/oauth/google/callback?\n  code=auth_code_123&\n  state=random_token
+
+Auth -> Redis: Verify state token\nKey: "oauth_state:{state}"
+Redis --> Auth: State data
+
+alt Invalid or expired state
+    Auth --> Client: 400 Bad Request\n{error: "Invalid state"}
+    Client --> User: Authentication failed
+else Valid state
+    Auth -> Redis: Delete used state token
+    
+    Auth -> Auth: Prepare token exchange request\n{\n  code,\n  client_id,\n  client_secret,\n  redirect_uri,\n  grant_type: "authorization_code"\n}
+    
+    Auth -> OAuth: POST /token\n{code, client_id, client_secret, ...}
+    OAuth -> OAuth: Validate authorization code
+    OAuth -> OAuth: Generate access & refresh tokens
+    OAuth --> Auth: 200 OK\n{\n  access_token: "ya29...",\n  refresh_token: "1//...",\n  expires_in: 3600,\n  token_type: "Bearer",\n  scope: "email profile"\n}
+    
+    Auth -> OAuth: GET /userinfo\nAuthorization: Bearer ya29...
+    OAuth --> Auth: User profile\n{\n  sub: "google_user_id",\n  email: "user@gmail.com",\n  name: "John Doe",\n  picture: "https://..."\n}
+    
+    Auth -> MongoDB: Find user by email or\nOAuth provider + provider_user_id
+    MongoDB --> Auth: User data or null
+    
+    alt User exists
+        Auth -> Auth: Link OAuth account if not linked
+        Auth -> MongoDB: Update OAuth account\n{\n  user_id,\n  provider: "google",\n  provider_user_id: "sub",\n  access_token: encrypt(token),\n  refresh_token: encrypt(token),\n  expires_at,\n  email,\n  name,\n  avatar_url\n}
+    else New user (first OAuth login)
+        Auth -> MongoDB: Create new user\n{\n  email,\n  is_verified: true,\n  is_oauth: true\n}
+        MongoDB --> Auth: User created
+        
+        Auth -> MongoDB: Create OAuth account\n{\n  user_id,\n  provider: "google",\n  provider_user_id,\n  access_token: encrypt(...),\n  refresh_token: encrypt(...),\n  ...\n}
+    end
+    
+    Auth -> Auth: Generate JWT access token\nfor our application
+    Auth -> Auth: Generate refresh token\nfor our application
+    Auth -> MongoDB: Store our refresh token
+    Auth -> Redis: Cache user session\nKey: "session:{user_id}"
+    
+    Auth --> Client: 302 Redirect to app\nwith tokens in URL fragment\n#access_token=eyJ...&\nrefresh_token=xxx&\nexpires_in=900
+    
+    Client -> Client: Extract tokens from URL
+    Client -> Client: Store tokens securely
+    Client --> User: Redirect to dashboard
+end
+
+== OAuth2 Implicit Flow (Single Page Apps) ==
+
+note over User, OAuth
+  Implicit flow is similar but:
+  1. response_type = "token" instead of "code"
+  2. Access token returned directly in redirect
+  3. No token exchange step
+  4. Less secure, not recommended
+end note
+
+== OAuth2 Client Credentials Flow (Service-to-Service) ==
+
+participant "Service A" as ServiceA
+participant "Auth Service" as Auth2
+
+ServiceA -> Auth2: POST /oauth/token\n{\n  grant_type: "client_credentials",\n  client_id: "service_a",\n  client_secret: "secret",\n  scope: "api.read api.write"\n}
+
+Auth2 -> Auth2: Validate client credentials
+Auth2 -> Auth2: Check requested scopes
+Auth2 -> Auth2: Generate access token\n(no refresh token in this flow)
+
+Auth2 --> ServiceA: 200 OK\n{\n  access_token: "eyJ...",\n  token_type: "Bearer",\n  expires_in: 3600,\n  scope: "api.read api.write"\n}
+
+ServiceA -> ServiceA: Use token for API calls
+
+== OAuth Token Refresh ==
+
+Client -> Client: OAuth access token expired
+Client -> Auth: POST /api/v1/auth/oauth/google/refresh\n{user_id}
+
+Auth -> MongoDB: Get OAuth account\n{provider: "google", user_id}
+MongoDB --> Auth: OAuth account with\nencrypted refresh_token
+
+Auth -> Auth: Decrypt OAuth refresh token
+
+Auth -> OAuth: POST /token\n{\n  refresh_token,\n  client_id,\n  client_secret,\n  grant_type: "refresh_token"\n}
+
+OAuth -> OAuth: Validate refresh token
+OAuth --> Auth: 200 OK\n{\n  access_token: "new_token",\n  expires_in: 3600\n}
+
+Auth -> Auth: Encrypt new access token
+Auth -> MongoDB: Update OAuth account\n{access_token, expires_at}
+MongoDB --> Auth: Updated
+
+Auth --> Client: 200 OK\n{message: "OAuth token refreshed"}
+
+== Security Considerations ==
+
+note over Auth, OAuth
+  Security Best Practices:
+  
+  1. **State Parameter**: Always validate to prevent CSRF
+  2. **HTTPS Only**: All OAuth flows must use HTTPS
+  3. **Token Storage**: Encrypt OAuth tokens at rest
+  4. **Token Encryption**: Use AES-256 for stored tokens
+  5. **Short-lived Tokens**: Access tokens expire quickly
+  6. **Refresh Token Rotation**: Rotate on each use
+  7. **Scope Limitation**: Request minimum required scopes
+  8. **Redirect URI Validation**: Whitelist exact URIs
+  9. **PKCE**: Use for mobile/SPA applications
+  10. **Rate Limiting**: Prevent token exchange abuse
+end note
+
+@enduml

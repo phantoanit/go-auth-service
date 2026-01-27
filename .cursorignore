@@ -1,0 +1,84 @@
+# ========================
+# Dependencies
+# ========================
+node_modules/
+vendor/
+.go/pkg/mod/
+.gradle/
+.mvn/
+
+# ========================
+# Build outputs
+# ========================
+dist/
+build/
+out/
+bin/
+coverage/
+.next/
+.nuxt/
+.target/
+
+# ========================
+# Logs & runtime
+# ========================
+*.log
+logs/
+tmp/
+temp/
+.cache/
+.npm/
+.yarn/
+
+# ========================
+# Environment & secrets
+# ========================
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+
+# ========================
+# IDE / OS files
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ========================
+# Databases & dumps
+# ========================
+*.sql
+*.dump
+*.bak
+*.backup
+*.sqlite
+*.db
+
+# ========================
+# Large generated assets
+# ========================
+public/uploads/
+storage/uploads/
+media/
+uploads/
+
+# ========================
+# Package managers
+# ========================
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+composer.lock
+go.sum
+
+# ========================
+# Monorepo helpers (nếu có)
+# ========================
+**/generated/
+**/migrations/*.sql

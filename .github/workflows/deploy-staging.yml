@@ -1,0 +1,14 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    uses: vhvplatform/vsystem-saas-cicd/.github/workflows/master-pipeline-staging.yml@main
+    secrets: inherit
+
+    with:
+      service_name: auth-service
+      deployment_file_name: auth-ser-deployment

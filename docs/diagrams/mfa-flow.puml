@@ -1,0 +1,240 @@
+@startuml MFA Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+
+title Multi-Factor Authentication (MFA) Flow
+
+actor User
+participant "Client App" as Client
+participant "Auth Service" as Auth
+participant "Authenticator App" as Authenticator
+database MongoDB
+database Redis
+
+== MFA Setup/Enrollment ==
+
+User -> Client: Navigate to security settings
+Client -> Auth: GET /api/v1/auth/mfa/setup\nAuthorization: Bearer {access_token}
+
+Auth -> Auth: Validate access token
+Auth -> Auth: Check if MFA already enabled
+
+alt MFA already enabled
+    Auth --> Client: 400 Bad Request\n{error: "MFA already enabled"}
+    Client --> User: MFA is already configured
+else MFA not enabled
+    Auth -> Auth: Generate TOTP secret\n(base32 encoded, 32 bytes)
+    note right
+      Secret Generation:
+      - Random 160-bit secret
+      - Base32 encoded
+      - Example: JBSWY3DPEHPK3PXP
+    end note
+    
+    Auth -> Auth: Generate provisioning URI\notpauth://totp/\n  SaaSApp:user@example.com?\n  secret=JBSWY3DPEHPK3PXP&\n  issuer=SaaSApp&\n  algorithm=SHA1&\n  digits=6&\n  period=30
+    
+    Auth -> Auth: Generate QR code image\nfrom provisioning URI
+    
+    Auth -> Auth: Generate backup codes\n(8 codes, 8 digits each)
+    note right
+      Backup Codes:
+      - 8 single-use codes
+      - Each: 8 random digits
+      - Hashed before storage
+      - Used if device lost
+    end note
+    
+    Auth -> Redis: Store pending MFA setup\nKey: "mfa_pending:{user_id}"\nValue: {\n  secret,\n  backup_codes_hash\n}\nTTL: 10 minutes
+    Redis --> Auth: Stored
+    
+    Auth --> Client: 200 OK\n{\n  qr_code: "data:image/png;base64,...",\n  secret: "JBSWY3DPEHPK3PXP",\n  backup_codes: ["12345678", ...]\n}
+    Client --> User: Display QR code and backup codes
+end
+
+User -> Authenticator: Scan QR code
+Authenticator -> Authenticator: Store secret\nGenerate TOTP codes
+Authenticator --> User: Show 6-digit code\n(refreshes every 30s)
+
+User -> User: Save backup codes securely
+User -> Client: Enter verification code
+Client -> Auth: POST /api/v1/auth/mfa/verify\nAuthorization: Bearer {access_token}\n{\n  code: "123456"\n}
+
+Auth -> Auth: Validate access token
+Auth -> Redis: Get pending MFA setup\nKey: "mfa_pending:{user_id}"
+Redis --> Auth: {secret, backup_codes_hash}
+
+alt No pending setup
+    Auth --> Client: 400 Bad Request\n{error: "No pending MFA setup"}
+    Client --> User: Please start setup again
+else Pending setup found
+    Auth -> Auth: Generate expected TOTP code\nusing secret and current time
+    note right
+      TOTP Algorithm:
+      TOTP = HOTP(secret, T)
+      T = floor((current_time - T0) / X)
+      - T0 = 0 (Unix epoch)
+      - X = 30 seconds
+      - HOTP uses HMAC-SHA1
+    end note
+    
+    Auth -> Auth: Compare codes\n(allow ±1 time window for clock skew)
+    
+    alt Code invalid
+        Auth --> Client: 400 Bad Request\n{error: "Invalid code"}
+        Client --> User: Invalid code, try again
+    else Code valid
+        Auth -> Auth: Hash backup codes
+        Auth -> MongoDB: Enable MFA for user\n{\n  mfa_enabled: true,\n  mfa_secret: encrypt(secret),\n  backup_codes: [hash1, hash2, ...],\n  mfa_enabled_at: now()\n}
+        MongoDB --> Auth: MFA enabled
+        
+        Auth -> Redis: Delete pending setup
+        Auth -> Redis: Invalidate all existing sessions\nfor this user (force re-auth)
+        
+        Auth --> Client: 200 OK\n{message: "MFA enabled successfully"}
+        Client --> User: MFA is now active!\nYou'll need codes to login
+    end
+end
+
+== Login with MFA ==
+
+User -> Client: Enter credentials
+Client -> Auth: POST /api/v1/auth/login\n{email, password}
+
+Auth -> Auth: Validate credentials
+Auth -> MongoDB: Get user\n{email}
+MongoDB --> Auth: User with mfa_enabled: true
+
+alt Credentials invalid
+    Auth --> Client: 401 Unauthorized
+    Client --> User: Invalid credentials
+else Credentials valid
+    Auth -> Auth: Generate temporary MFA token\n(valid for 5 minutes)
+    Auth -> Redis: Store MFA session\nKey: "mfa_session:{mfa_token}"\nValue: {user_id, login_time}\nTTL: 5 minutes
+    
+    Auth --> Client: 200 OK\n{\n  requires_mfa: true,\n  mfa_token: "temp_token_xyz"\n}
+    Client --> User: MFA required\nEnter authenticator code
+end
+
+User -> Authenticator: Check current code
+Authenticator --> User: 6-digit code (e.g., 654321)
+
+User -> Client: Enter MFA code
+Client -> Auth: POST /api/v1/auth/mfa/authenticate\n{\n  mfa_token: "temp_token_xyz",\n  code: "654321"\n}
+
+Auth -> Redis: Get MFA session\nKey: "mfa_session:{mfa_token}"
+Redis --> Auth: {user_id, login_time}
+
+alt MFA session not found or expired
+    Auth --> Client: 401 Unauthorized\n{error: "MFA session expired"}
+    Client --> User: Session expired, login again
+else MFA session valid
+    Auth -> MongoDB: Get user MFA secret
+    MongoDB --> Auth: {mfa_secret: encrypted}
+    
+    Auth -> Auth: Decrypt MFA secret
+    Auth -> Auth: Generate expected TOTP\nusing secret and current time
+    Auth -> Auth: Compare with provided code\n(allow ±1 time window)
+    
+    alt Code invalid
+        Auth -> Redis: Increment failed attempts\nKey: "mfa_failed:{user_id}"
+        Redis --> Auth: Attempt count
+        
+        alt Failed attempts >= 3
+            Auth -> Redis: Lock MFA for user\nKey: "mfa_locked:{user_id}"\nTTL: 15 minutes
+            Auth -> Redis: Delete MFA session
+            Auth --> Client: 429 Too Many Requests\n{error: "Too many failed attempts"}
+            Client --> User: Account temporarily locked
+        else
+            Auth --> Client: 401 Unauthorized\n{error: "Invalid MFA code"}
+            Client --> User: Invalid code, try again
+        end
+    else Code valid
+        Auth -> Redis: Clear failed attempts
+        Auth -> Redis: Delete MFA session
+        
+        Auth -> Auth: Generate JWT tokens\n(same as normal login)
+        Auth -> MongoDB: Store refresh token
+        Auth -> Redis: Cache user session
+        Auth -> MongoDB: Update last_login_at
+        
+        Auth --> Client: 200 OK\n{\n  access_token: "eyJ...",\n  refresh_token: "xxx",\n  expires_in: 900\n}
+        Client -> Client: Store tokens
+        Client --> User: Login successful
+    end
+end
+
+== Login with Backup Code ==
+
+note over Client, Auth
+  If user lost authenticator device,
+  they can use backup codes
+end note
+
+User -> Client: Click "Use backup code"
+Client -> Auth: POST /api/v1/auth/mfa/authenticate\n{\n  mfa_token: "temp_token_xyz",\n  backup_code: "12345678"\n}
+
+Auth -> Redis: Get MFA session
+Auth -> MongoDB: Get user backup codes
+MongoDB --> Auth: [hash1, hash2, hash3, ...]
+
+Auth -> Auth: Hash provided backup code
+Auth -> Auth: Compare with stored hashes
+
+alt Code not found or already used
+    Auth --> Client: 401 Unauthorized\n{error: "Invalid backup code"}
+    Client --> User: Invalid code
+else Code valid
+    Auth -> MongoDB: Mark backup code as used\n(remove from array)
+    MongoDB --> Auth: Updated
+    
+    Auth -> MongoDB: Check remaining codes
+    
+    alt Only 2 codes remaining
+        Auth -> Auth: Send warning email\n"Only 2 backup codes left"
+    end
+    
+    Auth -> Redis: Delete MFA session
+    Auth -> Auth: Generate JWT tokens
+    Auth --> Client: 200 OK + tokens\n{warning: "X backup codes remaining"}
+    Client --> User: Login successful\nConsider regenerating backup codes
+end
+
+== MFA Disable ==
+
+User -> Client: Navigate to security settings
+Client -> Auth: POST /api/v1/auth/mfa/disable\nAuthorization: Bearer {access_token}\n{\n  password: "user_password",\n  code: "123456"\n}
+
+Auth -> Auth: Validate access token
+Auth -> Auth: Verify password
+Auth -> Auth: Verify TOTP code
+
+alt Verification failed
+    Auth --> Client: 401 Unauthorized
+    Client --> User: Invalid credentials or code
+else Verification successful
+    Auth -> MongoDB: Disable MFA\n{\n  mfa_enabled: false,\n  mfa_secret: null,\n  backup_codes: [],\n  mfa_disabled_at: now()\n}
+    MongoDB --> Auth: MFA disabled
+    
+    Auth -> Auth: Send security alert email
+    Auth --> Client: 200 OK
+    Client --> User: MFA disabled successfully
+end
+
+== Security Notes ==
+
+note over Auth, MongoDB
+  Security Considerations:
+  
+  1. **Secret Storage**: Encrypt TOTP secrets at rest
+  2. **Time Sync**: Handle clock skew (±1 window)
+  3. **Rate Limiting**: Max 3 attempts per session
+  4. **Backup Codes**: One-time use, hashed storage
+  5. **Session Timeout**: MFA sessions expire in 5 min
+  6. **Account Recovery**: Email-based recovery flow
+  7. **Audit Logging**: Log all MFA events
+  8. **Device Memory**: Remember trusted devices (optional)
+end note
+
+@enduml

@@ -1,0 +1,138 @@
+@startuml Two-Factor Authentication Flow
+
+title 2FA (Two-Factor Authentication) Flow using TOTP
+
+actor User
+participant "Web Client" as Client
+participant "Auth Service" as Auth
+participant "TOTP Library" as TOTP
+database "MongoDB" as DB
+database "Redis Cache" as Redis
+
+== 2FA Setup Phase ==
+User -> Client: Enable 2FA in settings
+Client -> Auth: POST /api/v1/auth/2fa/setup\nHeader: Authorization: Bearer {token}
+Auth -> Auth: Extract user_id from token
+Auth -> TOTP: GenerateSecret()
+TOTP --> Auth: {secret_key, qr_code_url}
+Auth -> DB: Store 2FA secret\n{user_id, secret, is_enabled: false}
+Auth --> Client: {secret_key, qr_code_url}
+Client --> User: Display QR code
+
+User -> User: Scan QR code with\nAuthenticator app\n(Google Authenticator, Authy)
+
+User -> Client: Enter 6-digit code from app
+Client -> Auth: POST /api/v1/auth/2fa/verify-setup\n{code}
+Auth -> DB: Get user's 2FA secret
+DB --> Auth: {secret, is_enabled: false}
+Auth -> TOTP: VerifyCode(secret, code)
+TOTP -> TOTP: Calculate expected codes\n(current + ±1 time window)
+alt Code is valid
+    TOTP --> Auth: Code valid
+    Auth -> DB: Update 2FA status\nSET is_enabled = true
+    Auth -> DB: Generate backup codes (10)\nStore hashed backup codes
+    Auth --> Client: {success: true, backup_codes: [...]}
+    Client --> User: 2FA enabled successfully!\nSave backup codes
+else Invalid code
+    TOTP --> Auth: Code invalid
+    Auth --> Client: {error: "Invalid code"}
+    Client --> User: Invalid code, try again
+end
+
+== Login with 2FA ==
+User -> Client: Enter username and password
+Client -> Auth: POST /api/v1/auth/login\n{email, password}
+Auth -> DB: Verify credentials
+DB --> Auth: User found, credentials valid
+Auth -> DB: Check if 2FA enabled
+DB --> Auth: is_2fa_enabled: true
+
+Auth -> Auth: Generate temporary session token\n(valid for 5 minutes)
+Auth -> Redis: Store pending 2FA session\nKey: 2fa_pending:{session_token}\nValue: {user_id, timestamp}\nTTL: 5 minutes
+Auth --> Client: {requires_2fa: true, session_token}
+
+Client --> User: Prompt for 2FA code
+User -> Client: Enter 6-digit code
+Client -> Auth: POST /api/v1/auth/2fa/verify\n{session_token, code}
+
+Auth -> Redis: Get pending session
+Redis --> Auth: {user_id, timestamp}
+Auth -> DB: Get user's 2FA secret
+DB --> Auth: {secret, is_enabled: true}
+Auth -> TOTP: VerifyCode(secret, code)
+
+alt Code is valid
+    TOTP --> Auth: Valid
+    Auth -> Auth: Generate JWT tokens
+    Auth -> DB: Store refresh token
+    Auth -> Redis: Create full session
+    Auth -> Redis: Delete pending 2FA session
+    Auth -> DB: Update last_login_at
+    Auth --> Client: {access_token, refresh_token, user}
+    Client --> User: Login successful
+else Invalid code
+    TOTP --> Auth: Invalid
+    Auth -> Redis: Increment failed attempts\nKey: 2fa_failed:{user_id}
+    Auth -> Redis: Check failed attempt count
+    alt Too many failures (> 5)
+        Auth -> Redis: Delete pending session
+        Auth -> DB: Lock account temporarily
+        Auth --> Client: {error: "Too many failed attempts"}
+        Client --> User: Account locked for 15 minutes
+    else Within limit
+        Auth --> Client: {error: "Invalid code", attempts_remaining}
+        Client --> User: Invalid code, try again
+    end
+end
+
+== Using Backup Code ==
+note over User, Client
+  If user loses access to authenticator app,
+  they can use one-time backup codes
+end note
+
+User -> Client: Click "Use backup code"
+Client -> Auth: POST /api/v1/auth/2fa/verify-backup\n{session_token, backup_code}
+Auth -> Redis: Get pending session
+Auth -> DB: Get user's backup codes (hashed)
+Auth -> Auth: Hash provided backup code
+Auth -> Auth: Compare with stored hashes
+alt Backup code valid
+    Auth -> DB: Mark backup code as used
+    Auth -> Auth: Generate JWT tokens
+    Auth -> Redis: Create full session
+    Auth -> Redis: Delete pending session
+    Auth --> Client: {access_token, refresh_token}
+    Client --> User: Login successful\nRegenerate backup codes!
+else Invalid backup code
+    Auth --> Client: {error: "Invalid backup code"}
+    Client --> User: Invalid code
+end
+
+== Disable 2FA ==
+User -> Client: Disable 2FA in settings
+Client -> Auth: POST /api/v1/auth/2fa/disable\n{password, code}\nHeader: Authorization
+Auth -> Auth: Verify user password
+Auth -> TOTP: VerifyCode(secret, code)
+alt Password and code valid
+    Auth -> DB: Update user\nSET is_2fa_enabled = false\nSET secret = null
+    Auth -> DB: Delete backup codes
+    Auth --> Client: {success: true}
+    Client --> User: 2FA disabled
+else Invalid
+    Auth --> Client: {error: "Invalid credentials"}
+    Client --> User: Verification failed
+end
+
+== Security Features ==
+note over Auth, TOTP
+  1. Time-based codes (30-second windows)
+  2. Temporary session tokens (5 min expiry)
+  3. Rate limiting on verification attempts
+  4. Account lockout after failures
+  5. Backup codes for recovery
+  6. Secret stored encrypted
+  7. Audit logging for 2FA events
+end note
+
+@enduml

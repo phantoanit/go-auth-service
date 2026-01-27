@@ -1,0 +1,85 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+bin/
+dist/
+build/
+*.o
+*.a
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+test-output.log
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Environment variables
+.env
+.env.dev
+.env.local
+.env.*.local
+*.env
+
+# IDE - VSCode
+.vscode/
+*.code-workspace
+
+# IDE - IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# IDE - Other
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+*.bak
+*.backup
+
+# Debugger
+debug
+__debug_bin
+.air.toml
+
+# Kubeconfig
+kubeconfig
+*.kubeconfig
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Docker
+docker-compose.override.yml
+
+# Generated files
+*.gen.go
+
+# Copilot working directory (per instructions)
+tasks/

@@ -1,0 +1,295 @@
+@startuml Architecture Diagram
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+skinparam componentStyle rectangle
+
+title Auth Service Architecture - Components & Dependencies
+
+' External clients
+actor "Web Client" as WebClient
+actor "Mobile Client" as MobileClient
+actor "Third-party Service" as ThirdParty
+
+' Load balancer / Gateway
+component "API Gateway" as Gateway {
+    [Rate Limiter]
+    [Load Balancer]
+    [Request Router]
+}
+
+' Auth Service
+package "Auth Service" {
+    ' HTTP/gRPC Handlers
+    component "API Layer" {
+        [HTTP/REST Handler]
+        [gRPC Handler]
+        [WebSocket Handler]
+        [Health Check]
+    }
+    
+    ' Middleware
+    component "Middleware" {
+        [Auth Middleware]
+        [CORS Middleware]
+        [Logging Middleware]
+        [Rate Limit Middleware]
+        [Validation Middleware]
+    }
+    
+    ' Business Logic
+    component "Service Layer" {
+        [Auth Service Logic]
+        [User Service Logic]
+        [Token Service Logic]
+        [OAuth Service Logic]
+        [MFA Service Logic]
+        [Session Manager]
+    }
+    
+    ' Data Access
+    component "Repository Layer" {
+        [User Repository]
+        [Role Repository]
+        [Refresh Token Repo]
+        [OAuth Account Repo]
+        [Audit Log Repo]
+    }
+    
+    ' Domain
+    component "Domain Layer" {
+        [User Model]
+        [Role Model]
+        [Token Model]
+        [Request/Response DTOs]
+        [Validators]
+    }
+}
+
+' External Services
+cloud "OAuth Providers" {
+    [Google OAuth]
+    [GitHub OAuth]
+    [Microsoft OAuth]
+}
+
+' Email Service
+component "Email Service" {
+    [SMTP Server]
+    [Template Engine]
+    [Queue Worker]
+}
+
+' Databases
+database "MongoDB" {
+    [users]
+    [roles]
+    [permissions]
+    [refresh_tokens]
+    [oauth_accounts]
+    [audit_logs]
+}
+
+database "Redis" {
+    [Sessions]
+    [Token Blacklist]
+    [Rate Limits]
+    [Cache]
+    [MFA Tokens]
+}
+
+' Message Queue
+queue "Message Queue" {
+    [RabbitMQ / Kafka]
+}
+
+' Monitoring & Logging
+cloud "Observability" {
+    [Prometheus]
+    [Grafana]
+    [ELK Stack]
+    [Jaeger (Tracing)]
+}
+
+' Security Services
+component "Security" {
+    [Secrets Manager]
+    [Vault]
+    [Certificate Manager]
+}
+
+' Shared Libraries
+component "Shared Libraries\n(vhvplatform/go-shared)" {
+    [Config Loader]
+    [Logger]
+    [MongoDB Client]
+    [Redis Client]
+    [JWT Manager]
+    [Error Handler]
+    [Validator]
+    [Response Builder]
+}
+
+' Relationships
+WebClient --> Gateway : HTTPS/REST
+MobileClient --> Gateway : HTTPS/REST
+ThirdParty --> Gateway : gRPC
+
+Gateway --> [HTTP/REST Handler] : HTTP
+Gateway --> [gRPC Handler] : gRPC
+Gateway --> [Rate Limiter] : Check limits
+
+[HTTP/REST Handler] --> [Middleware]
+[gRPC Handler] --> [Middleware]
+[WebSocket Handler] --> [Middleware]
+
+[Middleware] --> [Service Layer]
+
+[Auth Service Logic] --> [Repository Layer]
+[User Service Logic] --> [Repository Layer]
+[Token Service Logic] --> [Repository Layer]
+[OAuth Service Logic] --> [Repository Layer]
+[MFA Service Logic] --> [Repository Layer]
+[Session Manager] --> Redis : Session ops
+
+[Repository Layer] --> MongoDB : CRUD ops
+[Repository Layer] --> Redis : Cache ops
+
+[OAuth Service Logic] --> [Google OAuth] : OAuth flow
+[OAuth Service Logic] --> [GitHub OAuth] : OAuth flow
+[OAuth Service Logic] --> [Microsoft OAuth] : OAuth flow
+
+[Auth Service Logic] --> [Email Service] : Send emails
+[Email Service] --> [Message Queue] : Async processing
+
+[Service Layer] --> [Shared Libraries] : Use utilities
+
+[Health Check] --> MongoDB : Health check
+[Health Check] --> Redis : Health check
+
+' Monitoring
+[HTTP/REST Handler] --> [Prometheus] : Metrics
+[gRPC Handler] --> [Prometheus] : Metrics
+[Logging Middleware] --> [ELK Stack] : Logs
+[Service Layer] --> [Jaeger (Tracing)] : Traces
+
+' Security
+[Service Layer] --> [Secrets Manager] : Get secrets
+[Token Service Logic] --> [Vault] : Key management
+
+note right of "Auth Service"
+  Core Features:
+  - User authentication (email/password)
+  - JWT token generation & validation
+  - OAuth2 social login
+  - Multi-factor authentication (TOTP)
+  - Session management
+  - Password reset flow
+  - Role-based access control
+  - Multi-tenancy support
+end note
+
+note bottom of MongoDB
+  Collections:
+  - users: User accounts
+  - roles: RBAC roles
+  - permissions: Granular permissions
+  - refresh_tokens: Long-lived tokens
+  - oauth_accounts: Social login data
+  - audit_logs: Security events
+  
+  Indexes:
+  - email (unique)
+  - tenant_id
+  - token_hash (unique)
+end note
+
+note bottom of Redis
+  Key Patterns:
+  - session:{id}: User sessions
+  - blacklist:{jti}: Revoked tokens
+  - rate_limit:{ip}: Rate limiting
+  - cache:user:{id}: User data cache
+  - mfa_token:{id}: MFA temp tokens
+  - reset_token:{hash}: Password reset
+  
+  TTL Management:
+  - Sessions: 15 minutes (sliding)
+  - Blacklist: Token lifetime
+  - Rate limits: 1 minute to 1 hour
+  - Cache: 5-15 minutes
+end note
+
+note right of "Shared Libraries\n(vhvplatform/go-shared)"
+  Shared Components:
+  - Configuration management
+  - Structured logging (zap)
+  - Database clients
+  - JWT utilities
+  - Common middleware
+  - Validation helpers
+  - Error handling
+  - Response formatting
+end note
+
+' Deployment View
+package "Deployment (Kubernetes)" {
+    component "Auth Service Pods" {
+        [Pod 1]
+        [Pod 2]
+        [Pod 3]
+    }
+    
+    component "Services" {
+        [Service (ClusterIP)]
+        [Ingress]
+    }
+    
+    component "Config & Secrets" {
+        [ConfigMap]
+        [Secrets]
+    }
+}
+
+note bottom of "Deployment (Kubernetes)"
+  Kubernetes Resources:
+  - Deployment: 3 replicas (HA)
+  - Service: LoadBalancer type
+  - Ingress: TLS termination
+  - HPA: Auto-scaling (CPU > 70%)
+  - PodDisruptionBudget: Min 2 available
+  - NetworkPolicy: Restrict traffic
+  - ServiceMonitor: Prometheus metrics
+end note
+
+' Data Flow
+note left of [HTTP/REST Handler]
+  Request Flow:
+  1. Client → API Gateway
+  2. Rate limiting check
+  3. Route to handler
+  4. Middleware pipeline:
+     - Logging
+     - CORS
+     - Validation
+     - Authentication (if required)
+  5. Service layer (business logic)
+  6. Repository layer (data access)
+  7. Response formatting
+  8. Return to client
+end note
+
+' Security Flow
+note right of [Middleware]
+  Security Layers:
+  1. TLS/HTTPS encryption
+  2. API Gateway (DDoS protection)
+  3. Rate limiting (prevent abuse)
+  4. Input validation (prevent injection)
+  5. Authentication (JWT verification)
+  6. Authorization (RBAC/permissions)
+  7. Audit logging (track actions)
+  8. Output encoding (prevent XSS)
+end note
+
+@enduml
